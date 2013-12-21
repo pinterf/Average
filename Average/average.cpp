@@ -1,0 +1,190 @@
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#include "avisynth.h"
+#include <stdint.h>
+#include <algorithm>
+#include <emmintrin.h>
+#include <vector>
+
+template<int minimum, int maximum>
+static __forceinline int static_clip(float val) {
+    if (val > maximum) {
+        return maximum;
+    }
+    if (val < minimum) {
+        return minimum;
+    }
+    return (int)val;
+}
+
+static inline void weighted_average_c(uint8_t *dstp, int dst_pitch, const uint8_t **src_pointers, int *src_pitches, float *weights, int frames_count, int width, int height) {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            float acc = 0;
+            for (int i = 0; i < frames_count; ++i) {
+                acc += src_pointers[i][x] * weights[i];
+            }
+            dstp[x] = static_clip<0, 255>(acc);
+        }
+
+        for (int i = 0; i < frames_count; ++i) {
+            src_pointers[i] += src_pitches[i];
+        }
+        dstp += dst_pitch;
+    }
+}
+
+static inline void weighted_average_sse2(uint8_t *dstp, int dst_pitch, const uint8_t **src_pointers, int *src_pitches, float *weights, int frames_count, int width, int height) {
+    int mod8_width = width / 8 * 8;
+    __m128i zero = _mm_setzero_si128();
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < mod8_width; x += 8) {
+            __m128 acc_lo = _mm_setzero_ps();
+            __m128 acc_hi = _mm_setzero_ps();
+            
+            for (int i = 0; i < frames_count; ++i) {
+                auto src = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src_pointers[i]+x));
+                auto weight = _mm_set1_ps(weights[i]);
+
+                src = _mm_unpacklo_epi8(src, zero);
+                auto src_lo_ps = _mm_cvtepi32_ps(_mm_unpacklo_epi16(src, zero));
+                auto src_hi_ps = _mm_cvtepi32_ps(_mm_unpackhi_epi16(src, zero));
+
+                auto weighted_lo = _mm_mul_ps(src_lo_ps, weight);
+                auto weighted_hi = _mm_mul_ps(src_hi_ps, weight);
+                
+                acc_lo = _mm_add_ps(acc_lo, weighted_lo);
+                acc_hi = _mm_add_ps(acc_hi, weighted_hi);
+            }
+            auto dst_lo = _mm_cvtps_epi32(acc_lo);
+            auto dst_hi = _mm_cvtps_epi32(acc_hi);
+
+            auto dst = _mm_packs_epi32(dst_lo, dst_hi);
+            dst = _mm_packus_epi16(dst, zero);
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(dstp+x), dst);
+        }
+
+        for (int x = mod8_width; x < width; ++x) {
+            float acc = 0;
+            for (int i = 0; i < frames_count; ++i) {
+                acc += src_pointers[i][x] * weights[i];
+            }
+            dstp[x] = static_clip<0, 255>(acc);
+        }
+
+        for (int i = 0; i < frames_count; ++i) {
+            src_pointers[i] += src_pitches[i];
+        }
+        dstp += dst_pitch;
+    }
+}
+
+struct WeightedClip {
+    PClip clip;
+    float weight;
+
+    WeightedClip(PClip _clip, float _weight) : clip(_clip), weight(_weight) {}
+};
+
+
+class Average : public GenericVideoFilter {
+public:
+    Average(std::vector<WeightedClip> clips, IScriptEnvironment* env)
+        : GenericVideoFilter(clips[0].clip), clips_(clips) {
+    }
+
+    PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment *env);
+
+private:
+    std::vector<WeightedClip> clips_;
+};
+
+
+PVideoFrame Average::GetFrame(int n, IScriptEnvironment *env) {
+    int frames_count = clips_.size();
+    PVideoFrame* src_frames = reinterpret_cast<PVideoFrame*>(alloca(frames_count * sizeof(PVideoFrame)));
+    const uint8_t **src_ptrs = reinterpret_cast<const uint8_t **>(alloca(sizeof(uint8_t*) * frames_count));
+    int *src_pitches = reinterpret_cast<int*>(alloca(sizeof(int) * frames_count));
+    float *weights = reinterpret_cast<float*>(alloca(sizeof(float)* frames_count));
+    if (src_pitches == nullptr || src_frames == nullptr || src_ptrs == nullptr || weights == nullptr) {
+        env->ThrowError("Average: Couldn't allocate memory on stack. This is a bug, please report");
+    }
+    memset(src_frames, 0, frames_count * sizeof(PVideoFrame));
+
+    for (int i = 0; i < frames_count; ++i) {
+        src_frames[i] = clips_[i].clip->GetFrame(n, env);
+        weights[i] = clips_[i].weight;
+    }
+
+    PVideoFrame dst = env->NewVideoFrame(vi);
+#pragma warning(disable: 4800)
+    bool sse2 = env->GetCPUFlags() & CPUF_SSE2;
+#pragma warning(default: 4800)
+    const static int planes[] = { PLANAR_Y, PLANAR_U, PLANAR_V };
+    for (int pid = 0; pid < (vi.IsY8() ? 1 : 3); pid++) {
+        int plane = planes[pid];
+        int width = dst->GetRowSize(plane);
+        int height = dst->GetHeight(plane);
+        auto dstp = dst->GetWritePtr(plane);
+        int dst_pitch = dst->GetPitch(plane);
+
+        for (int i = 0; i < frames_count; ++i) {
+            src_ptrs[i] = src_frames[i]->GetReadPtr(plane);
+            src_pitches[i] = src_frames[i]->GetPitch(plane);
+        }
+        if (sse2) {
+            weighted_average_sse2(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
+        } else {
+            weighted_average_c(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
+        }
+    }
+
+    return dst;
+}
+
+
+AVSValue __cdecl create_average(AVSValue args, void* user_data, IScriptEnvironment* env) {
+    int arguments_count = args[0].ArraySize();
+    if (arguments_count % 2 != 0) {
+        env->ThrowError("Average requires an even number of arguments.");
+    }
+    if (arguments_count == 0) {
+        env->ThrowError("Average: At least one clip has to be supplied.");
+    }
+    std::vector<WeightedClip> clips;
+    auto first_clip = args[0][0].AsClip();
+    auto first_vi = first_clip->GetVideoInfo();
+    clips.emplace_back(first_clip, args[0][1].AsFloat());
+
+    for (int i = 2; i < arguments_count; i += 2) {
+        auto clip = args[0][i].AsClip();
+        float weight = args[0][i+1].AsFloat();
+        if (std::abs(weight) < 0.00001f) {
+            continue;
+        }
+        auto vi = clip->GetVideoInfo();
+        if (!vi.IsSameColorspace(first_vi)) {
+            env->ThrowError("Average: all clips must have the same colorspace.");
+        }
+        if (vi.width != first_vi.width || vi.height != first_vi.height) {
+            env->ThrowError("Average: all clips must have identical width and height.");
+        }
+        if (vi.num_frames < first_vi.num_frames) {
+            env->ThrowError("Average: all clips must be have same or greater number of frames as the first one.");
+        }
+
+        clips.emplace_back(clip, weight);
+    }
+
+    return new Average(clips, env);
+}
+
+const AVS_Linkage *AVS_linkage = nullptr;
+
+extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScriptEnvironment* env, const AVS_Linkage* const vectors) {
+    AVS_linkage = vectors;
+    env->AddFunction("average", ".*", create_average, 0);
+    return "I want a candy";
+}
