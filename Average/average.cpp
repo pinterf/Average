@@ -156,11 +156,12 @@ AVSValue __cdecl create_average(AVSValue args, void* user_data, IScriptEnvironme
     std::vector<WeightedClip> clips;
     auto first_clip = args[0][0].AsClip();
     auto first_vi = first_clip->GetVideoInfo();
-    clips.emplace_back(first_clip, args[0][1].AsFloat());
+    //AsDblDef for now because AsFloat is broken on x64
+    clips.emplace_back(first_clip, (float)args[0][1].AsDblDef(0));
 
     for (int i = 2; i < arguments_count; i += 2) {
         auto clip = args[0][i].AsClip();
-        float weight = args[0][i+1].AsFloat();
+        float weight = (float)args[0][i+1].AsDblDef(0);
         if (std::abs(weight) < 0.00001f) {
             continue;
         }
@@ -186,5 +187,5 @@ const AVS_Linkage *AVS_linkage = nullptr;
 extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScriptEnvironment* env, const AVS_Linkage* const vectors) {
     AVS_linkage = vectors;
     env->AddFunction("average", ".*", create_average, 0);
-    return "I want a candy";
+    return "Mind your sugar level";
 }
