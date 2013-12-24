@@ -81,6 +81,74 @@ static inline void weighted_average_sse2(uint8_t *dstp, int dst_pitch, const uin
     }
 }
 
+static inline void weighted_average_int_sse2(uint8_t *dstp, int dst_pitch, const uint8_t **src_pointers, int *src_pitches, float *weights, int frames_count, int width, int height) {
+    int16_t *int_weights = reinterpret_cast<int16_t*>(alloca(frames_count*sizeof(int16_t)));
+    for (int i = 0; i < frames_count; ++i) {
+        int_weights[i] = static_cast<int16_t>((1 << 14) * weights[i]);
+    }
+    int mod8_width = width / 8 * 8;
+    __m128i zero = _mm_setzero_si128();
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < mod8_width; x += 8) {
+            __m128i acc_lo = _mm_setzero_si128();
+            __m128i acc_hi = _mm_setzero_si128();
+
+            for (int i = 0; i < frames_count-1; i+=2) {
+                __m128i src = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src_pointers[i]+x));
+                __m128i src2 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src_pointers[i+1]+x));
+                __m128i weight = _mm_set1_epi32(*reinterpret_cast<int*>(int_weights + i));
+
+                src = _mm_unpacklo_epi8(src, zero);
+                src2 = _mm_unpacklo_epi8(src2, zero);
+                __m128i src_lo = _mm_unpacklo_epi16(src, src2);
+                __m128i src_hi = _mm_unpackhi_epi16(src, src2);
+
+                __m128i weighted_lo = _mm_madd_epi16(src_lo, weight);
+                __m128i weighted_hi = _mm_madd_epi16(src_hi, weight);
+
+                acc_lo = _mm_add_epi32(acc_lo, weighted_lo);
+                acc_hi = _mm_add_epi32(acc_hi, weighted_hi);
+            }
+
+            if (frames_count % 2 != 0) {
+                __m128i src = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src_pointers[frames_count-1]+x));
+                __m128i weight = _mm_set1_epi32(int_weights[frames_count - 1]);
+
+                src = _mm_unpacklo_epi8(src, zero);
+                __m128i src_lo = _mm_unpacklo_epi16(src, zero);
+                __m128i src_hi = _mm_unpackhi_epi16(src, zero);
+
+                __m128i weighted_lo = _mm_madd_epi16(src_lo, weight);
+                __m128i weighted_hi = _mm_madd_epi16(src_hi, weight);
+
+                acc_lo = _mm_add_epi32(acc_lo, weighted_lo);
+                acc_hi = _mm_add_epi32(acc_hi, weighted_hi);
+            }
+
+            __m128i dst_lo = _mm_srai_epi32(acc_lo, 14);
+            __m128i dst_hi = _mm_srai_epi32(acc_hi, 14);
+
+            __m128i dst = _mm_packs_epi32(dst_lo, dst_hi);
+            dst = _mm_packus_epi16(dst, zero);
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(dstp+x), dst);
+        }
+
+        for (int x = mod8_width; x < width; ++x) {
+            float acc = 0;
+            for (int i = 0; i < frames_count; ++i) {
+                acc += src_pointers[i][x] * weights[i];
+            }
+            dstp[x] = static_clip<0, 255>(acc);
+        }
+
+        for (int i = 0; i < frames_count; ++i) {
+            src_pointers[i] += src_pitches[i];
+        }
+        dstp += dst_pitch;
+    }
+}
+
 struct WeightedClip {
     PClip clip;
     float weight;
@@ -93,20 +161,37 @@ class Average : public GenericVideoFilter {
 public:
     Average(std::vector<WeightedClip> clips, IScriptEnvironment* env)
         : GenericVideoFilter(clips[0].clip), clips_(clips) {
+
+        if (env->GetCPUFlags() & CPUF_SSE2) {
+            processor_ = &weighted_average_int_sse2;
+
+            for (const auto& clip: clips) {
+                if (std::abs(clip.weight) > 1) {
+                    processor_ = &weighted_average_sse2;
+                    break;
+                }
+            }
+            if (clips.size() > 255) {
+                processor_ = &weighted_average_sse2;
+            }
+        } else {
+            processor_ = &weighted_average_c;
+        }
     }
 
     PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment *env);
 
 private:
     std::vector<WeightedClip> clips_;
+    decltype(&weighted_average_c) processor_;
 };
 
 
 PVideoFrame Average::GetFrame(int n, IScriptEnvironment *env) {
     int frames_count = clips_.size();
     PVideoFrame* src_frames = reinterpret_cast<PVideoFrame*>(alloca(frames_count * sizeof(PVideoFrame)));
-    const uint8_t **src_ptrs = reinterpret_cast<const uint8_t **>(alloca(sizeof(uint8_t*) * frames_count));
-    int *src_pitches = reinterpret_cast<int*>(alloca(sizeof(int) * frames_count));
+    const uint8_t **src_ptrs = reinterpret_cast<const uint8_t **>(alloca(sizeof(uint8_t*)* frames_count));
+    int *src_pitches = reinterpret_cast<int*>(alloca(sizeof(int)* frames_count));
     float *weights = reinterpret_cast<float*>(alloca(sizeof(float)* frames_count));
     if (src_pitches == nullptr || src_frames == nullptr || src_ptrs == nullptr || weights == nullptr) {
         env->ThrowError("Average: Couldn't allocate memory on stack. This is a bug, please report");
@@ -119,9 +204,6 @@ PVideoFrame Average::GetFrame(int n, IScriptEnvironment *env) {
     }
 
     PVideoFrame dst = env->NewVideoFrame(vi);
-#pragma warning(disable: 4800)
-    bool sse2 = env->GetCPUFlags() & CPUF_SSE2;
-#pragma warning(default: 4800)
     const static int planes[] = { PLANAR_Y, PLANAR_U, PLANAR_V };
     for (int pid = 0; pid < (vi.IsY8() ? 1 : 3); pid++) {
         int plane = planes[pid];
@@ -134,11 +216,8 @@ PVideoFrame Average::GetFrame(int n, IScriptEnvironment *env) {
             src_ptrs[i] = src_frames[i]->GetReadPtr(plane);
             src_pitches[i] = src_frames[i]->GetPitch(plane);
         }
-        if (sse2) {
-            weighted_average_sse2(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
-        } else {
-            weighted_average_c(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
-        }
+
+        processor_(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
     }
 
     return dst;
