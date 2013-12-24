@@ -235,12 +235,11 @@ AVSValue __cdecl create_average(AVSValue args, void* user_data, IScriptEnvironme
     std::vector<WeightedClip> clips;
     auto first_clip = args[0][0].AsClip();
     auto first_vi = first_clip->GetVideoInfo();
-    //AsDblDef for now because AsFloat is broken on x64
-    clips.emplace_back(first_clip, (float)args[0][1].AsDblDef(0));
+    clips.emplace_back(first_clip, static_cast<float>(args[0][1].AsFloat()));
 
     for (int i = 2; i < arguments_count; i += 2) {
         auto clip = args[0][i].AsClip();
-        float weight = (float)args[0][i+1].AsDblDef(0);
+        float weight = static_cast<float>(args[0][i+1].AsFloat());
         if (std::abs(weight) < 0.00001f) {
             continue;
         }
