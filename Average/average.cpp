@@ -220,6 +220,10 @@ PVideoFrame Average::GetFrame(int n, IScriptEnvironment *env) {
         processor_(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
     }
 
+    for (int i = 0; i < frames_count; ++i) {
+        src_frames[i].~PVideoFrame();
+    }
+
     return dst;
 }
 
