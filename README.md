@@ -22,6 +22,7 @@ New: Support for Avisynth+ color spaces: 10-16 bit and float YUV(A)/Planar RGB(A
      10+ bits are calculated in float precision internally.
 New: auto register as NICE_FILTER for Avisynth+
 New: add version resource
+Info: built with VS2015 Update 3, may require Visual Studio 2015 Redistributable update 3
 
 v0.92 (20141227 - tp7) 
 This release fixes a very important memory leak which made the plugin unusable for somewhat complex scripts.
