@@ -18,37 +18,77 @@ static __forceinline int static_clip(float val) {
     return (int)val;
 }
 
+template<typename pixel_t, int bits_per_pixel>
 static inline void weighted_average_c(uint8_t *dstp, int dst_pitch, const uint8_t **src_pointers, int *src_pitches, float *weights, int frames_count, int width, int height) {
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            float acc = 0;
-            for (int i = 0; i < frames_count; ++i) {
-                acc += src_pointers[i][x] * weights[i];
-            }
-            dstp[x] = static_clip<0, 255>(acc);
-        }
+  // width is rowsize
+  const int max_pixel_value = (sizeof(pixel_t) == 1) ? 255 : ((1 << bits_per_pixel) - 1);
 
-        for (int i = 0; i < frames_count; ++i) {
-            src_pointers[i] += src_pitches[i];
-        }
-        dstp += dst_pitch;
+  width /= sizeof(pixel_t);
+
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      float acc = 0;
+      for (int i = 0; i < frames_count; ++i) {
+        acc += reinterpret_cast<const pixel_t *>(src_pointers[i])[x] * weights[i];
+      }
+      if (sizeof(pixel_t) == 4)
+        reinterpret_cast<float *>(dstp)[x] = acc;
+      else
+        reinterpret_cast<pixel_t *>(dstp)[x] = (pixel_t)(static_clip<0, max_pixel_value>(acc));
     }
+
+    for (int i = 0; i < frames_count; ++i) {
+      src_pointers[i] += src_pitches[i];
+    }
+    dstp += dst_pitch;
+  }
 }
 
+// fake _mm_packus_epi32 (orig is SSE4.1 only)
+__forceinline __m128i _MM_PACKUS_EPI32(__m128i a, __m128i b)
+{
+  a = _mm_slli_epi32(a, 16);
+  a = _mm_srai_epi32(a, 16);
+  b = _mm_slli_epi32(b, 16);
+  b = _mm_srai_epi32(b, 16);
+  a = _mm_packs_epi32(a, b);
+  return a;
+}
+
+// hasSSE4: only counts where uint16_t and bits_per_pixel == 16
+template<typename pixel_t, int bits_per_pixel, bool hasSSE4>
 static inline void weighted_average_sse2(uint8_t *dstp, int dst_pitch, const uint8_t **src_pointers, int *src_pitches, float *weights, int frames_count, int width, int height) {
-    int mod8_width = width / 8 * 8;
+    // width is row_size
+    int mod_width;
+    if(sizeof(pixel_t) == 1)
+      mod_width = width / 8 * 8;
+    else
+      mod_width = width / 16 * 16;
+
+    const int sse_size = (sizeof(pixel_t) == 1) ? 8 : 16;
+
+    const int max_pixel_value = (sizeof(pixel_t) == 1) ? 255 : ((1 << bits_per_pixel) - 1);
+    __m128i pixel_limit;
+    if (sizeof(pixel_t) == 2 && bits_per_pixel < 16)
+      pixel_limit = _mm_set1_epi16((int16_t)max_pixel_value);
+
     __m128i zero = _mm_setzero_si128();
 
     for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < mod8_width; x += 8) {
+        for (int x = 0; x < mod_width; x += sse_size) {
             __m128 acc_lo = _mm_setzero_ps();
             __m128 acc_hi = _mm_setzero_ps();
             
             for (int i = 0; i < frames_count; ++i) {
-                auto src = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src_pointers[i]+x));
+                __m128i src;
+                if (sizeof(pixel_t) == 1)
+                  src = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src_pointers[i] + x));
+                else
+                  src = _mm_load_si128(reinterpret_cast<const __m128i*>(src_pointers[i] + x));
                 auto weight = _mm_set1_ps(weights[i]);
 
-                src = _mm_unpacklo_epi8(src, zero);
+                if(sizeof(pixel_t) == 1)
+                  src = _mm_unpacklo_epi8(src, zero);
                 auto src_lo_ps = _mm_cvtepi32_ps(_mm_unpacklo_epi16(src, zero));
                 auto src_hi_ps = _mm_cvtepi32_ps(_mm_unpackhi_epi16(src, zero));
 
@@ -61,17 +101,40 @@ static inline void weighted_average_sse2(uint8_t *dstp, int dst_pitch, const uin
             auto dst_lo = _mm_cvtps_epi32(acc_lo);
             auto dst_hi = _mm_cvtps_epi32(acc_hi);
 
-            auto dst = _mm_packs_epi32(dst_lo, dst_hi);
-            dst = _mm_packus_epi16(dst, zero);
-            _mm_storel_epi64(reinterpret_cast<__m128i*>(dstp+x), dst);
+            __m128i dst;
+            if (sizeof(pixel_t) == 1) {
+              dst = _mm_packs_epi32(dst_lo, dst_hi);
+              dst = _mm_packus_epi16(dst, zero);
+            }
+            else if (sizeof(pixel_t) == 2) {
+              if (bits_per_pixel < 16) {
+                dst = _mm_packs_epi32(dst_lo, dst_hi); // no need for packus
+              }
+              else {
+                if(hasSSE4)
+                  dst = _mm_packus_epi32(dst_lo, dst_hi);
+                else
+                  dst = _MM_PACKUS_EPI32(dst_lo, dst_hi); // SSE2 friendly but slower
+              }
+            }
+            
+            if (sizeof(pixel_t) == 2 && bits_per_pixel < 16)
+              dst = _mm_min_epi16(dst, pixel_limit); // no need for SSE4 epu16 
+
+            if(sizeof(pixel_t) == 1)
+              _mm_storel_epi64(reinterpret_cast<__m128i*>(dstp+x), dst);
+            else
+              _mm_store_si128(reinterpret_cast<__m128i*>(dstp + x), dst);
         }
 
-        for (int x = mod8_width; x < width; ++x) {
+        int start = mod_width / sizeof(pixel_t);
+        int end = width / sizeof(pixel_t);
+        for (int x = start; x < end; ++x) {
             float acc = 0;
             for (int i = 0; i < frames_count; ++i) {
-                acc += src_pointers[i][x] * weights[i];
+                acc += reinterpret_cast<const pixel_t *>(src_pointers[i])[x] * weights[i];
             }
-            dstp[x] = static_clip<0, 255>(acc);
+            reinterpret_cast<pixel_t *>(dstp)[x] = static_clip<0, max_pixel_value>(acc);
         }
 
         for (int i = 0; i < frames_count; ++i) {
@@ -80,6 +143,47 @@ static inline void weighted_average_sse2(uint8_t *dstp, int dst_pitch, const uin
         dstp += dst_pitch;
     }
 }
+
+static inline void weighted_average_f_sse2(uint8_t *dstp, int dst_pitch, const uint8_t **src_pointers, int *src_pitches, float *weights, int frames_count, int width, int height) {
+  // width is row_size
+  int mod_width = width / 16 * 16;
+
+  const int sse_size = 16;
+
+  __m128i zero = _mm_setzero_si128();
+
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < mod_width; x += sse_size) {
+      __m128 acc = _mm_setzero_ps();
+
+      for (int i = 0; i < frames_count; ++i) {
+        __m128 src;
+        src = _mm_load_ps(reinterpret_cast<const float*>(src_pointers[i] + x));
+        auto weight = _mm_set1_ps(weights[i]);
+
+        auto weighted = _mm_mul_ps(src, weight);
+
+        acc = _mm_add_ps(acc, weighted);
+      }
+
+      _mm_store_ps(reinterpret_cast<float*>(dstp + x), acc);
+    }
+
+    for (int x = mod_width / 4; x < width / 4; ++x) {
+      float acc = 0;
+      for (int i = 0; i < frames_count; ++i) {
+        acc += reinterpret_cast<const float *>(src_pointers[i])[x] * weights[i];
+      }
+      reinterpret_cast<float *>(dstp)[x] = acc; // float: no clamping
+    }
+
+    for (int i = 0; i < frames_count; ++i) {
+      src_pointers[i] += src_pitches[i];
+    }
+    dstp += dst_pitch;
+  }
+}
+
 
 template<int frames_count_2_3_more>
 static inline void weighted_average_int_sse2(uint8_t *dstp, int dst_pitch, const uint8_t **src_pointers, int *src_pitches, float *weights, int frames_count, int width, int height) {
@@ -244,26 +348,81 @@ public:
 
     int frames_count = clips_.size();
 
-    if (env->GetCPUFlags() & CPUF_SSE2) {
-      if (frames_count == 2)
-        processor_ = &weighted_average_int_sse2<2>;
-      else if (frames_count == 3)
-        processor_ = &weighted_average_int_sse2<3>;
-      else
-        processor_ = &weighted_average_int_sse2<0>;
+    int pixelsize = vi.ComponentSize();
+    int bits_per_pixel = vi.BitsPerComponent();
 
-      for (const auto& clip : clips) {
-        if (std::abs(clip.weight) > 1) {
-          processor_ = &weighted_average_sse2;
+    if (env->GetCPUFlags() & CPUF_SSE2) {
+      bool use_weighted_average_f = false;
+      if (pixelsize == 1) {
+        if (frames_count == 2)
+          processor_ = &weighted_average_int_sse2<2>;
+        else if (frames_count == 3)
+          processor_ = &weighted_average_int_sse2<3>;
+        else
+          processor_ = &weighted_average_int_sse2<0>;
+        for (const auto& clip : clips) {
+          if (std::abs(clip.weight) > 1) {
+            use_weighted_average_f = true;
+            break;
+          }
+        }
+        if (clips.size() > 255) {
+          // too many clips, may overflow
+          use_weighted_average_f = true;
+        }
+      }
+      else {
+        // uint16 and float: float mode internally
+        use_weighted_average_f = true;
+      }
+
+      if (use_weighted_average_f) {
+        switch(bits_per_pixel) {
+        case 8: 
+          processor_ = &weighted_average_sse2<uint8_t, 8, false>;
+          break;
+        case 10: 
+          processor_ = &weighted_average_sse2<uint16_t, 10, false>;
+          break;
+        case 12:
+          processor_ = &weighted_average_sse2<uint16_t, 12, false>;
+          break;
+        case 14:
+          processor_ = &weighted_average_sse2<uint16_t, 14, false>;
+          break;
+        case 16:
+          if(env->GetCPUFlags() & CPUF_SSE4_1)
+            processor_ = &weighted_average_sse2<uint16_t, 16, true>;
+          else
+            processor_ = &weighted_average_sse2<uint16_t, 16, false>;
+          break;
+        case 32:
+          processor_ = &weighted_average_f_sse2;
           break;
         }
       }
-      if (clips.size() > 255) {
-        processor_ = &weighted_average_sse2;
-      }
     }
     else {
-      processor_ = &weighted_average_c;
+      switch (bits_per_pixel) {
+      case 8:
+        processor_ = &weighted_average_c<uint8_t, 8>;
+        break;
+      case 10:
+        processor_ = &weighted_average_c<uint16_t, 10>;
+        break;
+      case 12:
+        processor_ = &weighted_average_c<uint16_t, 12>;
+        break;
+      case 14:
+        processor_ = &weighted_average_c<uint16_t, 14>;
+        break;
+      case 16:
+        processor_ = &weighted_average_c<uint16_t, 16>;
+        break;
+      case 32:
+        processor_ = &weighted_average_c<float, 1>; // bits_per_pixel n/a
+        break;
+      }
     }
   }
 
@@ -271,7 +430,7 @@ public:
 
 private:
   std::vector<WeightedClip> clips_;
-  decltype(&weighted_average_c) processor_;
+  decltype(&weighted_average_c<uint8_t,8>) processor_;
 };
 
 
@@ -292,8 +451,14 @@ PVideoFrame Average::GetFrame(int n, IScriptEnvironment *env) {
     }
 
     PVideoFrame dst = env->NewVideoFrame(vi);
-    const static int planes[] = { PLANAR_Y, PLANAR_U, PLANAR_V };
-    for (int pid = 0; pid < (vi.IsY8() ? 1 : 3); pid++) {
+
+    int planes_y[4] = { PLANAR_Y, PLANAR_U, PLANAR_V, PLANAR_A };
+    int planes_r[4] = { PLANAR_G, PLANAR_B, PLANAR_R, PLANAR_A };
+    int *planes = (vi.IsPlanarRGB() || vi.IsPlanarRGBA()) ? planes_r : planes_y;
+    
+    bool hasAlpha = vi.IsPlanarRGBA() || vi.IsYUVA();
+
+    for (int pid = 0; pid < (vi.IsY() ? 1 : (hasAlpha ? 4 : 3)); pid++) {
         int plane = planes[pid];
         int width = dst->GetRowSize(plane);
         int height = dst->GetHeight(plane);
