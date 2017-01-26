@@ -195,7 +195,6 @@ static inline void weighted_average_int_sse2(uint8_t *dstp, int dst_pitch, const
     __m128i zero = _mm_setzero_si128();
 
     __m128i round_mask = _mm_set1_epi32(0x2000);
-    __m128i round_mask2 = _mm_set_epi32(0x0000,0x2000,0x0000,0x2000);
 
     bool even_frames = (frames_count % 2 != 0);
 
@@ -217,9 +216,6 @@ static inline void weighted_average_int_sse2(uint8_t *dstp, int dst_pitch, const
           __m128i weighted_lo = _mm_madd_epi16(src_lo, weight);
           __m128i weighted_hi = _mm_madd_epi16(src_hi, weight);
 
-          weighted_lo = _mm_add_epi32(weighted_lo, round_mask);
-          weighted_hi = _mm_add_epi32(weighted_hi, round_mask);
-
           acc_lo = _mm_add_epi32(acc_lo, weighted_lo);
           acc_hi = _mm_add_epi32(acc_hi, weighted_hi);
 
@@ -234,12 +230,12 @@ static inline void weighted_average_int_sse2(uint8_t *dstp, int dst_pitch, const
             __m128i weighted_lo = _mm_madd_epi16(src_lo, weight);
             __m128i weighted_hi = _mm_madd_epi16(src_hi, weight);
 
-            weighted_lo = _mm_add_epi32(weighted_lo, round_mask2);
-            weighted_hi = _mm_add_epi32(weighted_hi, round_mask2);
-
             acc_lo = _mm_add_epi32(acc_lo, weighted_lo);
             acc_hi = _mm_add_epi32(acc_hi, weighted_hi);
           }
+
+          acc_lo = _mm_madd_epi16(acc_lo, round_mask);
+          acc_hi = _mm_madd_epi16(acc_hi, round_mask);
 
           __m128i dst_lo = _mm_srai_epi32(acc_lo, 14);
           __m128i dst_hi = _mm_srai_epi32(acc_hi, 14);
@@ -284,9 +280,6 @@ static inline void weighted_average_int_sse2(uint8_t *dstp, int dst_pitch, const
             __m128i weighted_lo = _mm_madd_epi16(src_lo, weight);
             __m128i weighted_hi = _mm_madd_epi16(src_hi, weight);
 
-            weighted_lo = _mm_add_epi32(weighted_lo, round_mask);
-            weighted_hi = _mm_add_epi32(weighted_hi, round_mask);
-
             acc_lo = _mm_add_epi32(acc_lo, weighted_lo);
             acc_hi = _mm_add_epi32(acc_hi, weighted_hi);
           }
@@ -302,12 +295,12 @@ static inline void weighted_average_int_sse2(uint8_t *dstp, int dst_pitch, const
             __m128i weighted_lo = _mm_madd_epi16(src_lo, weight);
             __m128i weighted_hi = _mm_madd_epi16(src_hi, weight);
 
-            weighted_lo = _mm_add_epi32(weighted_lo, round_mask2);
-            weighted_hi = _mm_add_epi32(weighted_hi, round_mask2);
-
             acc_lo = _mm_add_epi32(acc_lo, weighted_lo);
             acc_hi = _mm_add_epi32(acc_hi, weighted_hi);
           }
+
+          acc_lo = _mm_madd_epi16(acc_lo, round_mask);
+          acc_hi = _mm_madd_epi16(acc_hi, round_mask);
 
           __m128i dst_lo = _mm_srai_epi32(acc_lo, 14);
           __m128i dst_hi = _mm_srai_epi32(acc_hi, 14);
