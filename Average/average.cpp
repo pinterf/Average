@@ -346,7 +346,7 @@ public:
   Average(std::vector<WeightedClip> clips, IScriptEnvironment* env)
     : GenericVideoFilter(clips[0].clip), clips_(clips) {
 
-    int frames_count = clips_.size();
+    int frames_count = (int)clips_.size();
 
     int pixelsize = vi.ComponentSize();
     int bits_per_pixel = vi.BitsPerComponent();
@@ -428,6 +428,10 @@ public:
 
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment *env);
 
+  int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
+  }
+
 private:
   std::vector<WeightedClip> clips_;
   decltype(&weighted_average_c<uint8_t,8>) processor_;
@@ -435,7 +439,7 @@ private:
 
 
 PVideoFrame Average::GetFrame(int n, IScriptEnvironment *env) {
-    int frames_count = clips_.size();
+    int frames_count = (int)clips_.size();
     PVideoFrame* src_frames = reinterpret_cast<PVideoFrame*>(alloca(frames_count * sizeof(PVideoFrame)));
     const uint8_t **src_ptrs = reinterpret_cast<const uint8_t **>(alloca(sizeof(uint8_t*)* frames_count));
     int *src_pitches = reinterpret_cast<int*>(alloca(sizeof(int)* frames_count));
