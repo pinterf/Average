@@ -15,6 +15,14 @@ The filter performs faster when all weight in the call are less or equal to one.
 
 ### History
 ```
+v0.94 (20170127)
+Fix: fix the fix: rounding of intermediate results was ok for two clips
+New: AVX for 10-16bit (+20-30%) and float (+50-60%) compared to v0.93
+     AVX for 8 bit non-integer path (+20% gain), e.g. when one of the weights is over 1.0
+     Note 1: AVX needs 32 byte frame alignment (Avisynth+ default)
+     Note 2: AVX CPU flag is reported by recent Avisynth+ version
+     Note 3: AVX is reported only on approriate OS (from Windows 7 SP1 on)
+
 v0.93 (20170126 - pinterf)
 Fix: rounding of intermediate results in fast integer average of 8 bit clips
 Mod: faster results for two or three clips
