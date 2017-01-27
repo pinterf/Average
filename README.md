@@ -32,13 +32,13 @@ New: auto register as NICE_FILTER for Avisynth+
 New: add version resource
 Info: built with VS2015 Update 3, may require Visual Studio 2015 Redistributable update 3
 
-v0.92 (20141227 - tp7) 
+v0.92 (20131227 - tp7) 
 This release fixes a very important memory leak which made the plugin unusable for somewhat complex scripts.
 
-v0.91 (20141224 - tp7)
+v0.91 (20131224 - tp7)
 Double performance when absolute values of all weights are smaller or equal to one.
 
-v0.90 (20141221 - tp7)
+v0.90 (20131221 - tp7)
 Initial release.
 ```
 
