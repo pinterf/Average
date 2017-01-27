@@ -2,10 +2,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include "avisynth.h"
+#include "avs\alignment.h"
 #include <stdint.h>
 #include <algorithm>
 #include <emmintrin.h>
 #include <vector>
+#include "average_avx.h"
 
 template<int minimum, int maximum>
 static __forceinline int static_clip(float val) {
@@ -344,15 +346,20 @@ public:
     int pixelsize = vi.ComponentSize();
     int bits_per_pixel = vi.BitsPerComponent();
 
+    bool avx = !!(env->GetCPUFlags() & CPUF_AVX);
+    // we don't know the alignment here. avisynth+: 32 bytes, classic: 16
+    // decide later (processor_, processor_32aligned)
+
     if (env->GetCPUFlags() & CPUF_SSE2) {
       bool use_weighted_average_f = false;
       if (pixelsize == 1) {
         if (frames_count == 2)
-          processor_ = &weighted_average_int_sse2<2>;
+          processor_ = &weighted_average_int_sse2<2>; 
         else if (frames_count == 3)
           processor_ = &weighted_average_int_sse2<3>;
         else
           processor_ = &weighted_average_int_sse2<0>;
+        processor_32aligned_ = processor_;
         for (const auto& clip : clips) {
           if (std::abs(clip.weight) > 1) {
             use_weighted_average_f = true;
@@ -373,24 +380,30 @@ public:
         switch(bits_per_pixel) {
         case 8: 
           processor_ = &weighted_average_sse2<uint8_t, 8, false>;
+          processor_32aligned_ = avx ? &weighted_average_avx<uint8_t, 8> : &weighted_average_sse2<uint8_t, 8, false>;
           break;
         case 10: 
           processor_ = &weighted_average_sse2<uint16_t, 10, false>;
+          processor_32aligned_ = avx ? &weighted_average_avx<uint16_t, 10> : &weighted_average_sse2<uint16_t, 10, false>;
           break;
         case 12:
           processor_ = &weighted_average_sse2<uint16_t, 12, false>;
+          processor_32aligned_ = avx ? &weighted_average_avx<uint16_t, 12> : &weighted_average_sse2<uint16_t, 12, false>;
           break;
         case 14:
           processor_ = &weighted_average_sse2<uint16_t, 14, false>;
+          processor_32aligned_ = avx ? &weighted_average_avx<uint16_t, 14> : &weighted_average_sse2<uint16_t, 14, false>;
           break;
         case 16:
           if(env->GetCPUFlags() & CPUF_SSE4_1)
             processor_ = &weighted_average_sse2<uint16_t, 16, true>;
           else
             processor_ = &weighted_average_sse2<uint16_t, 16, false>;
+          processor_32aligned_ = avx ? &weighted_average_avx<uint16_t, 16> : processor_;
           break;
         case 32:
           processor_ = &weighted_average_f_sse2;
+          processor_32aligned_ = avx ? &weighted_average_f_avx : &weighted_average_f_sse2;
           break;
         }
       }
@@ -416,6 +429,7 @@ public:
         processor_ = &weighted_average_c<float, 1>; // bits_per_pixel n/a
         break;
       }
+      processor_32aligned_ = processor_;
     }
   }
 
@@ -428,6 +442,7 @@ public:
 private:
   std::vector<WeightedClip> clips_;
   decltype(&weighted_average_c<uint8_t,8>) processor_;
+  decltype(&weighted_average_c<uint8_t, 8>) processor_32aligned_;
 };
 
 
@@ -462,12 +477,20 @@ PVideoFrame Average::GetFrame(int n, IScriptEnvironment *env) {
         auto dstp = dst->GetWritePtr(plane);
         int dst_pitch = dst->GetPitch(plane);
 
+        bool allSrc32aligned = true;
         for (int i = 0; i < frames_count; ++i) {
             src_ptrs[i] = src_frames[i]->GetReadPtr(plane);
             src_pitches[i] = src_frames[i]->GetPitch(plane);
+            if (!IsPtrAligned(src_ptrs[i], 32))
+              allSrc32aligned = false;
+            if(src_pitches[i] & 0x1F)
+              allSrc32aligned = false;
         }
 
-        processor_(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
+        if(IsPtrAligned(dstp,32) && (dst_pitch & 0x1F)==0 && allSrc32aligned)
+          processor_32aligned_(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
+        else
+          processor_(dstp, dst_pitch, src_ptrs, src_pitches, weights, frames_count, width, height);
     }
 
     for (int i = 0; i < frames_count; ++i) {
