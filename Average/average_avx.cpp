@@ -1,12 +1,7 @@
-#include <Windows.h>
-#include "avisynth.h"
-#include <stdint.h>
-#include <algorithm>
-#include <emmintrin.h>
-#include <vector>
+#include "average_avx.h"
 
 template<int minimum, int maximum>
-static __forceinline int static_clip(float val) {
+static inline int static_clip(float val) {
     if (val > maximum) {
         return maximum;
     }
