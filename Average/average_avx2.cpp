@@ -1,7 +1,7 @@
 #include "average_avx.h"
 
 template<int minimum, int maximum>
-static inline int static_clip(float val) {
+static AVS_FORCEINLINE int static_clip(float val) {
     if (val > maximum) {
         return maximum;
     }

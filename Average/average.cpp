@@ -1,7 +1,7 @@
 #include "average_avx.h"
 
 template<int minimum, int maximum>
-static inline int static_clip(float val) {
+static AVS_FORCEINLINE int static_clip(float val) {
     if (val > maximum) {
         return maximum;
     }
@@ -38,7 +38,7 @@ static inline void weighted_average_c(uint8_t *dstp, int dst_pitch, const uint8_
 }
 
 // fake _mm_packus_epi32 (orig is SSE4.1 only)
-inline __m128i _MM_PACKUS_EPI32(__m128i a, __m128i b)
+AVS_FORCEINLINE __m128i _MM_PACKUS_EPI32(__m128i a, __m128i b)
 {
   a = _mm_slli_epi32(a, 16);
   a = _mm_srai_epi32(a, 16);
