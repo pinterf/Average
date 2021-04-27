@@ -37,9 +37,8 @@ static inline void weighted_average_c(uint8_t *dstp, int dst_pitch, const uint8_
   }
 }
 
-// fake _mm_packus_epi32 (orig is SSE4.1 only)
-AVS_FORCEINLINE __m128i _MM_PACKUS_EPI32(__m128i a, __m128i b)
-{
+
+static __m128i avs_mm_packus_epi32_sse2(__m128i a, __m128i b) {
   a = _mm_slli_epi32(a, 16);
   a = _mm_srai_epi32(a, 16);
   b = _mm_slli_epi32(b, 16);
@@ -48,17 +47,23 @@ AVS_FORCEINLINE __m128i _MM_PACKUS_EPI32(__m128i a, __m128i b)
   return a;
 }
 
-__m128i compile_safe_mm_packus_epi32 (__m128i a, __m128i b) {
-    #ifdef __SSE4_1__
+#if defined(GCC) || defined(CLANG)
+__attribute__((__target__("sse4.1")))
+#endif
+static __m128i avs_mm_packus_epi32_sse41(__m128i a, __m128i b) {
     return _mm_packus_epi32(a, b);
-    #elif __SSE4_2__
-    return _mm_packus_epi32(a, b);
-    #else
-    return _MM_PACKUS_EPI32(a, b); // SSE2 friendly but slower
-    #endif
 }
 
-template<typename pixel_t, int bits_per_pixel>
+static AVS_FORCEINLINE __m128i avs_mm_packus_epi32(__m128i a, __m128i b, bool hasSSE4)  {
+    if (hasSSE4) {
+        return avs_mm_packus_epi32_sse41(a, b);
+    }
+    
+    return avs_mm_packus_epi32_sse2(a, b); // SSE2 friendly but slower
+}
+
+// hasSSE4: only counts where uint16_t and bits_per_pixel == 16
+template<typename pixel_t, int bits_per_pixel, bool hasSSE4>
 static inline void weighted_average_sse2(uint8_t *dstp, int dst_pitch, const uint8_t **src_pointers, int *src_pitches, float *weights, int frames_count, int width, int height) {
     // width is row_size
     int mod_width;
@@ -113,7 +118,7 @@ static inline void weighted_average_sse2(uint8_t *dstp, int dst_pitch, const uin
               if (bits_per_pixel < 16) {
                 dst = _mm_packs_epi32(dst_lo, dst_hi); // no need for packus
               } else {
-                dst = compile_safe_mm_packus_epi32(dst_lo, dst_hi);
+                dst = avs_mm_packus_epi32(dst_lo, dst_hi, hasSSE4);
               }
             }
             
@@ -376,23 +381,28 @@ public:
       if (use_weighted_average_f) {
         switch(bits_per_pixel) {
         case 8: 
-          processor_ = &weighted_average_sse2<uint8_t, 8>;
+          processor_ = &weighted_average_sse2<uint8_t, 8, false>;
           processor_32aligned_ = avx ? &weighted_average_avx<uint8_t, 8> : processor_;
           break;
         case 10: 
-          processor_ = &weighted_average_sse2<uint16_t, 10>;
+          processor_ = &weighted_average_sse2<uint16_t, 10, false>;
           processor_32aligned_ = avx ? &weighted_average_avx<uint16_t, 10> : processor_;
           break;
         case 12:
-          processor_ = &weighted_average_sse2<uint16_t, 12>;
+          processor_ = &weighted_average_sse2<uint16_t, 12, false>;
           processor_32aligned_ = avx ? &weighted_average_avx<uint16_t, 12> : processor_;
           break;
         case 14:
-          processor_ = &weighted_average_sse2<uint16_t, 14>;
+          processor_ = &weighted_average_sse2<uint16_t, 14, false>;
           processor_32aligned_ = avx ? &weighted_average_avx<uint16_t, 14> : processor_;
           break;
         case 16:
-          processor_ = &weighted_average_sse2<uint16_t, 16>;
+          if(env->GetCPUFlags() & CPUF_SSE4_1) {
+            processor_ = &weighted_average_sse2<uint16_t, 16, true>;
+          } else { 
+            processor_ = &weighted_average_sse2<uint16_t, 16, false>;
+          }
+          
           processor_32aligned_ = avx ? &weighted_average_avx<uint16_t, 16> : processor_;
           break;
         case 32:
